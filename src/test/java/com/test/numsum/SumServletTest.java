@@ -16,12 +16,10 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
+import java.util.UUID;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAccumulator;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.IntStream;
 
 import static org.junit.Assert.assertEquals;
@@ -34,32 +32,56 @@ public class SumServletTest extends Mockito {
     private static final Logger LOGGER = LoggerFactory.getLogger(SumServletTest.class);
 
     private LongAccumulator sum;
-    private LongAdder nrThreadCount;
     private ExecutorService executorService;
     private CountDownLatch latch;
-    private long expectedSum;
+    private String expectedResponse;
+    private AtomicReference<String> idRef;
+    private Phaser ph;
 
     @Before
     public void setup() {
         sum = new LongAccumulator(Long::sum, 0L);
-        nrThreadCount = new LongAdder();
         executorService = Executors.newCachedThreadPool();
+        ph = new Phaser(1);
+        String id = "";
+        idRef = new AtomicReference<>(id);
+    }
+
+    @Test
+    public void testInvalidEndKeyword() throws Exception {
+        latch = new CountDownLatch(3);
+        var expectedSum = Long.MAX_VALUE - 1;
+        var id = UUID.randomUUID() + " " + UUID.randomUUID();
+        expectedResponse = expectedSum + " " + id;
+
+        executeRequest(Long.MAX_VALUE + "", expectedResponse, 0, false);
+        executeRequest(Long.MIN_VALUE + "", expectedResponse, 0, false);
+        executeRequest(" end " + id, expectedResponse, 0, true);
+        executeRequest("send " + id, expectedResponse, 0, true);
+        executeRequest("endex " + id, expectedResponse, 0, true);
+        executeRequest(Long.MAX_VALUE + "", expectedResponse, 0, false);
+        executeRequest("end " + id, expectedResponse, 0, false);
+
+        assertTrue("Some requests did not complete before timeout (5s)", latch.await(5, TimeUnit.SECONDS));
     }
 
     @Test
     public void testBasicPositive() throws Exception {
         latch = new CountDownLatch(3);
-        expectedSum = 11;
+        var expectedSum = 11;
+        var id = UUID.randomUUID();
+        expectedResponse = expectedSum + " " + id;
 
-        executeRequest("4", expectedSum, 0, false);
-        executeRequest("7", expectedSum, 0, false);
-        executeRequest("end", expectedSum, 1000, false);
+        executeRequest("4", expectedResponse, 0, false);
+        executeRequest("7", expectedResponse, 0, false);
+        executeRequest("end " + id, expectedResponse, 200, false);
 
         assertTrue("Some requests did not complete before timeout (5s)", latch.await(5, TimeUnit.SECONDS));
 
         latch = new CountDownLatch(1);
         expectedSum = 0;
-        executeRequest("end", expectedSum, 1000, false);
+        expectedResponse = expectedSum + " " + id;
+        executeRequest("end " + id, expectedResponse, 200, false);
 
         assertTrue("The request did not complete before timeout (2s)", latch.await(2, TimeUnit.SECONDS));
     }
@@ -67,11 +89,13 @@ public class SumServletTest extends Mockito {
     @Test
     public void testBasicNegative() throws Exception {
         latch = new CountDownLatch(3);
-        expectedSum = -1;
+        var expectedSum = -1;
+        var id = UUID.randomUUID();
+        expectedResponse = expectedSum + " " + id;
 
-        executeRequest("-8", expectedSum, 0, false);
-        executeRequest("7", expectedSum, 0, false);
-        executeRequest("end", expectedSum, 1000, false);
+        executeRequest("-8", expectedResponse, 0, false);
+        executeRequest("7", expectedResponse, 0, false);
+        executeRequest("end " + id, expectedResponse, 20, false);
 
         assertTrue("Some requests did not complete before timeout (5s)", latch.await(5, TimeUnit.SECONDS));
     }
@@ -79,11 +103,13 @@ public class SumServletTest extends Mockito {
     @Test
     public void testNonNumber() throws Exception {
         latch = new CountDownLatch(3);
-        expectedSum = 7;
+        var expectedSum = 7;
+        var id = UUID.randomUUID();
+        expectedResponse = expectedSum + " " + id;
 
-        executeRequest("8s", expectedSum, 0, true);
-        executeRequest("7", expectedSum, 0, false);
-        executeRequest("end", expectedSum, 1000, false);
+        executeRequest("8s", expectedResponse, 0, true);
+        executeRequest("7", expectedResponse, 0, false);
+        executeRequest("end " + id, expectedResponse, 200, false);
 
         assertTrue("Some requests did not complete before timeout (5s)", latch.await(5, TimeUnit.SECONDS));
     }
@@ -91,11 +117,13 @@ public class SumServletTest extends Mockito {
     @Test
     public void testEndNotFinalRequest() throws Exception {
         latch = new CountDownLatch(3);
-        expectedSum = 8;
+        var expectedSum = 8;
+        var id = UUID.randomUUID();
+        expectedResponse = expectedSum + " " + id;
 
-        executeRequest("8", expectedSum, 0, false);
-        executeRequest("end", expectedSum, 1000, false);
-        executeRequest("7", expectedSum, 1000, false);
+        executeRequest("8", expectedResponse, 0, false);
+        executeRequest("end " + id, expectedResponse, 200, false);
+        executeRequest("7", expectedResponse, 200, false);
 
         assertFalse("Some requests did not complete before timeout (5s)", latch.await(5, TimeUnit.SECONDS));
     }
@@ -109,6 +137,7 @@ public class SumServletTest extends Mockito {
      */
     @Test
     public void testRandom() throws Exception {
+        var id = UUID.randomUUID();
         int nrOfRequests = 1 + (int) (Math.random() * (50 - 1));
         latch = new CountDownLatch(nrOfRequests + 1);
         List<Long> numbers = new ArrayList<>();
@@ -117,16 +146,16 @@ public class SumServletTest extends Mockito {
             long randomNr = -10000 + (long) (Math.random() * (10000 - (-10000)));
             numbers.add(randomNr);
         });
-        expectedSum = numbers.stream().mapToLong(Long::longValue).sum();
+        var expectedSum = numbers.stream().mapToLong(Long::longValue).sum();
+        expectedResponse = expectedSum + " " + id;
         numbers.forEach(nr -> {
             try {
-                int sleepTime = (int) (Math.random() * 1000);
-                executeRequest(String.valueOf(nr), expectedSum, sleepTime, false);
+                executeRequest(String.valueOf(nr), expectedResponse, 0, false);
             } catch (IOException | InterruptedException e) {
                 fail("Exception while executing request");
             }
         });
-        executeRequest("end", expectedSum, 1000, false);
+        executeRequest("end " + id, expectedResponse, 0, false);
         assertTrue("Some requests did not complete before timeout (60s)", latch.await(60, TimeUnit.SECONDS));
         LOGGER.info("Number of requests: {}", nrOfRequests);
         LOGGER.info("Numbers of the requests: {}", numbers);
@@ -136,13 +165,13 @@ public class SumServletTest extends Mockito {
     /**
      * Method for creating and executing a simulated request
      * @param body the body of the request
-     * @param expectedSum the value that is expected to be responded to the request
+     * @param expectedResponse the value that is expected to be responded to the request
      * @param sleepTime the wait time before creating and executing the request
      * @param expectedFail is the request expected to fail with 400 Bad Request
      * @throws IOException an exception
      * @throws InterruptedException an exception
      */
-    private void executeRequest(String body, long expectedSum, int sleepTime, boolean expectedFail) throws IOException, InterruptedException {
+    private void executeRequest(String body, String expectedResponse, int sleepTime, boolean expectedFail) throws IOException, InterruptedException {
         // Wait a bit to simulate the request not arriving instantly
         Thread.sleep(sleepTime);
 
@@ -163,20 +192,20 @@ public class SumServletTest extends Mockito {
             // This request is expected to fail with 400 Bad Request
             // When setStatus() is called on the mock response object, check the argument, it should be 400.
             doAnswer(invocation -> {
-                assertEquals("Response status was expected to be 400", (int) invocation.getArgument(0), HttpServletResponse.SC_BAD_REQUEST);
+                assertEquals("Response status was expected to be 400", HttpServletResponse.SC_BAD_REQUEST, (int) invocation.getArgument(0));
                 latch.countDown();
                 return null;
             }).when(response).setStatus(ArgumentMatchers.anyInt());
         } else {
             // This request is expected to receive the sum as the response
-            // When printLn() is called on the mock writer, check the argument, it should be the expected sum.
+            // When print() is called on the mock writer, check the argument, it should be the expected sum.
             doAnswer(invocation -> {
-                assertEquals("The returned sum was not as expected", (long) invocation.getArgument(0), expectedSum);
+                assertEquals("The returned response was not as expected", expectedResponse, invocation.<String>getArgument(0));
                 latch.countDown();
                 return null;
-            }).when(writer).println(ArgumentMatchers.anyLong());
+            }).when(writer).print(ArgumentMatchers.anyString());
         }
         // Run the simulated request
-        executorService.execute(new Thread(() -> new SumServletWorker(asyncContext, sum, nrThreadCount).run()));
+        executorService.execute(new Thread(() -> new SumServletWorker(asyncContext, sum, ph, idRef).run()));
     }
 }

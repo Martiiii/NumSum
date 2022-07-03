@@ -5,9 +5,9 @@ import javax.servlet.annotation.WebServlet;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
-import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Phaser;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAccumulator;
-import java.util.concurrent.atomic.LongAdder;
 
 /**
  * The main servlet class. Receives POST requests and asynchronously handles them.
@@ -16,13 +16,15 @@ import java.util.concurrent.atomic.LongAdder;
 public class SumServlet extends HttpServlet {
 
     private final LongAccumulator sum = new LongAccumulator(Long::sum, 0L);
-    private final LongAdder nrThreadCount = new LongAdder();
+    private final String id = "";
+    private final AtomicReference<String> idRef = new AtomicReference<>(id);
+    private final Phaser ph = new Phaser(1);
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) {
 
         final AsyncContext asyncContext = req.startAsync(req, resp);
-        ExecutorService executor = (ExecutorService) req.getServletContext().getAttribute("executor");
-        executor.execute(new SumServletWorker(asyncContext, sum, nrThreadCount));
+        asyncContext.setTimeout(-1);
+        asyncContext.start(new SumServletWorker(asyncContext, sum, ph, idRef));
     }
 }

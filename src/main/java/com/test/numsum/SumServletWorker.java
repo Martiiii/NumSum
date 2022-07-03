@@ -7,8 +7,9 @@ import javax.servlet.AsyncContext;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
+import java.util.concurrent.Phaser;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.LongAccumulator;
-import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
 /**
@@ -20,65 +21,54 @@ public class SumServletWorker implements Runnable {
 
     private final AsyncContext asyncContext;
     private final LongAccumulator sum;
-    private final LongAdder nrThreadCount;
+    private final Phaser ph;
+    private final AtomicReference<String> idRef;
 
     /**
      * Creates a new instance of the handler
+     *
      * @param asyncContext the context of the async request
-     * @param sum accumulator for the total sum of numbers
-     * @param nrThreadCount counter for the threads with a valid number in the body
+     * @param sum          accumulator for the total sum of numbers
+     * @param ph           phaser for controlling the flow of responses
+     * @param idRef        atomic reference to the "id" string
      */
-    public SumServletWorker(AsyncContext asyncContext, LongAccumulator sum, LongAdder nrThreadCount) {
+    public SumServletWorker(AsyncContext asyncContext, LongAccumulator sum, Phaser ph, AtomicReference<String> idRef) {
         this.asyncContext = asyncContext;
         this.sum = sum;
-        this.nrThreadCount = nrThreadCount;
+        this.ph = ph;
+        this.idRef = idRef;
     }
 
     @Override
     public void run() {
-        // Get request and response from the async context.
         HttpServletRequest request = (HttpServletRequest) asyncContext.getRequest();
         HttpServletResponse response = (HttpServletResponse) asyncContext.getResponse();
 
         try {
-            // Read the body of the POST request.
             String body = request.getReader().lines().collect(Collectors.joining(System.lineSeparator()));
-            if ("end".equals(body)) {
-                // "end" keyword received,
-                // create a new latch with the value being the number of threads with a number in the body.
-                SumLatch.create(nrThreadCount.intValue());
-
-                synchronized (sum) {
-                    // Reset the thread counter, notifying the "number" threads to
-                    // respond to their request with the "sum" value.
-                    nrThreadCount.reset();
-                    sum.notifyAll();
-                }
-                // Wait at the latch for the "number" threads to prepare their response.
-                SumLatch.getLatch().await();
+            if (body.startsWith("end ")) {
+                String id = body.substring(3);
+                idRef.set(id);
+                // Notify the "number" threads to respond to their request with the "sum" value
+                ph.arriveAndAwaitAdvance();
+                // Wait until "number" threads have returned the "sum" value
+                ph.arriveAndAwaitAdvance();
                 // Respond to the request with the "sum" value and also reset the sum accumulator
-                LOGGER.debug("Received \"end\", sum is {}", sum);
-                response.getWriter().println(sum.getThenReset());
+                LOGGER.debug("Received \"end\", sum is {}, id is {}", sum, id);
+                response.getWriter().print(sum.getThenReset() + idRef.getAndSet(""));
+                ph.arrive();
             } else {
-                // Parse the request body. A number is expected.
+                ph.register();
                 long number = Long.parseLong(body);
                 LOGGER.debug("Received a number: {}", number);
                 // Body appeared to be a valid number,
-                // increment the counter counting the threads with a number in the body.
-                nrThreadCount.increment();
                 // Add the parsed number to the sum of received numbers
                 sum.accumulate(number);
-
-                synchronized (sum) {
-                    // Wait until the "end" keyword is received and
-                    // the final sum can be returned as the response of this request
-                    while (nrThreadCount.intValue() != 0) {
-                        sum.wait();
-                    }
-                    response.getWriter().println(sum.get());
-                    // Count down the latch to notify that this request is ready to respond with the sum
-                    SumLatch.getLatch().countDown();
-                }
+                // Wait until the "end" keyword is received and
+                // the final sum can be returned as the response of this request
+                ph.arriveAndAwaitAdvance();
+                response.getWriter().print(sum.get() + idRef.get());
+                ph.arriveAndDeregister();
             }
             // Set response status to 200 OK, as everything went as expected
             response.setStatus(HttpServletResponse.SC_OK);
@@ -87,9 +77,11 @@ public class SumServletWorker implements Runnable {
             // respond with 400 Bad Request.
             LOGGER.debug("Received an invalid number/not \"end\", {}", e.getMessage());
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
-        } catch (IOException | InterruptedException e) {
+            ph.arriveAndDeregister();
+        } catch (IOException e) {
             LOGGER.error("Unexpected exception", e);
             response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+            ph.arriveAndDeregister();
         } finally {
             // End the async request operation
             asyncContext.complete();
